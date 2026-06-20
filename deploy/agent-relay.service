@@ -1,0 +1,24 @@
+[Unit]
+Description=Agent Gateway Relay (keyless)
+After=network-online.target
+
+[Service]
+User=phill
+WorkingDirectory=/home/phill/agent-gateway-relay
+Environment=RELAY_HOST=100.x.x.x
+Environment=RELAY_PORT=9991
+Environment=RELAY_FCM_CREDS=/home/phill/agent-gateway-relay/secrets/fcm-admin.json
+ExecStart=/home/phill/agent-gateway-relay/.venv/bin/gunicorn \
+    relay.app:app \
+    -k uvicorn.workers.UvicornWorker \
+    -b ${RELAY_HOST}:${RELAY_PORT} \
+    --workers 2 \
+    --access-logfile - \
+    --error-logfile -
+MemoryHigh=512M
+MemoryMax=768M
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
