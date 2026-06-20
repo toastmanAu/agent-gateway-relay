@@ -71,11 +71,11 @@ def precheck(
         az.add_token(b)
 
         # Ambient facts the token's checks reference (mirrors the device authorizer).
-        # Use add_code for multi-statement datalog including the account rule.
-        az.add_code(
-            f'operation("{op}"); recipient("{recipient}"); source_ip("{source_ip}");'
-            f" requested_account($a) <- account($a);"
-        )
+        # Parameterize facts to prevent datalog injection from attacker-controlled values.
+        az.add_fact(Fact("operation({v})", parameters={"v": op}))
+        az.add_fact(Fact("recipient({v})", parameters={"v": recipient}))
+        az.add_fact(Fact("source_ip({v})", parameters={"v": source_ip}))
+        az.add_code("requested_account($a) <- account($a);")
 
         # time() ambient fact — biscuit-python requires a datetime object as
         # the parameter value (converts to RFC3339 internally).

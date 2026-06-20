@@ -1,7 +1,7 @@
 fastapi==0.115.*
 uvicorn[standard]==0.34.*
 gunicorn==23.*
-biscuit-python==0.3.*
+biscuit-python==0.3.2
 firebase-admin==6.*
 pydantic==2.*
 pytest==8.*
