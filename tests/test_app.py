@@ -166,21 +166,75 @@ def test_pair_hashes_token(client, mem_store):
 
 
 def test_pair_upsert(client, mem_store, kp):
-    """Re-pairing with a new pub key updates the record."""
+    """Re-pairing with a new pub key and correct prev_device_token updates the record."""
     kp2 = KeyPair()
-    for k in (kp, kp2):
-        client.post(
-            "/pair",
-            json={
-                "device_id": DEVICE_ID,
-                "root_pub_hex": k.public_key.to_hex(),
-                "device_token": DEVICE_TOKEN_PLAIN,
-            },
-        )
+    # Initial pair (trust-on-first-use).
+    client.post(
+        "/pair",
+        json={
+            "device_id": DEVICE_ID,
+            "root_pub_hex": kp.public_key.to_hex(),
+            "device_token": DEVICE_TOKEN_PLAIN,
+        },
+    )
+    # Re-pair supplying prev_device_token.
+    r = client.post(
+        "/pair",
+        json={
+            "device_id": DEVICE_ID,
+            "root_pub_hex": kp2.public_key.to_hex(),
+            "device_token": DEVICE_TOKEN_PLAIN,
+            "prev_device_token": DEVICE_TOKEN_PLAIN,
+        },
+    )
+    assert r.status_code == 200
     row = mem_store._conn.execute(
         "SELECT root_pub_hex FROM devices WHERE device_id = ?", (DEVICE_ID,)
     ).fetchone()
     assert row["root_pub_hex"] == kp2.public_key.to_hex()
+
+
+def test_pair_repair_no_prev_token_forbidden(client, mem_store, kp):
+    """Re-pairing without prev_device_token → 403."""
+    client.post(
+        "/pair",
+        json={
+            "device_id": DEVICE_ID,
+            "root_pub_hex": kp.public_key.to_hex(),
+            "device_token": DEVICE_TOKEN_PLAIN,
+        },
+    )
+    r = client.post(
+        "/pair",
+        json={
+            "device_id": DEVICE_ID,
+            "root_pub_hex": "newkey" * 8,
+            "device_token": "new-token",
+        },
+    )
+    assert r.status_code == 403
+
+
+def test_pair_repair_wrong_prev_token_forbidden(client, mem_store, kp):
+    """Re-pairing with an incorrect prev_device_token → 403."""
+    client.post(
+        "/pair",
+        json={
+            "device_id": DEVICE_ID,
+            "root_pub_hex": kp.public_key.to_hex(),
+            "device_token": DEVICE_TOKEN_PLAIN,
+        },
+    )
+    r = client.post(
+        "/pair",
+        json={
+            "device_id": DEVICE_ID,
+            "root_pub_hex": "newkey" * 8,
+            "device_token": "new-token",
+            "prev_device_token": "wrong-previous-token",
+        },
+    )
+    assert r.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +455,59 @@ def test_result_bad_device_token(client):
         },
     )
     assert r.status_code == 401
+
+
+def test_result_cross_device_forgery_forbidden(client, mem_store, kp):
+    """Device B cannot post a result for device A's intent → 403."""
+    from relay.store import _hash_token
+
+    device_b_id = "device_b_001"
+    device_b_token = "device-b-secret-token"
+
+    # Register device A.
+    mem_store.pair_device(
+        device_id=DEVICE_ID,
+        root_pub_hex=kp.public_key.to_hex(),
+        device_token_hash=DEVICE_TOKEN_HASH,
+        fcm_token="",
+    )
+    # Register device B.
+    mem_store.pair_device(
+        device_id=device_b_id,
+        root_pub_hex=kp.public_key.to_hex(),
+        device_token_hash=_hash_token(device_b_token),
+        fcm_token="",
+    )
+
+    # Enqueue an intent that belongs to device A.
+    import json
+    intent_payload = {
+        "intent_id": "intent_device_a",
+        "op": OP,
+        "asset": "CKB",
+        "to": DEVICE_ID,
+        "amount": 10,
+        "nonce": "n_a",
+        "action": None,
+        "dao_ref": None,
+        "source_ip": SOURCE_IP,
+        "token": "tok",
+    }
+    mem_store.enqueue(
+        "intent_device_a", DEVICE_ID, "tok", json.dumps(intent_payload), SOURCE_IP
+    )
+
+    # Device B tries to post a result for device A's intent.
+    r = client.post(
+        "/relay/result",
+        json={
+            "device_token": device_b_token,
+            "intent_id": "intent_device_a",
+            "status": "sent",
+            "tx_hash": "0xforgery",
+        },
+    )
+    assert r.status_code == 403
 
 
 # ---------------------------------------------------------------------------

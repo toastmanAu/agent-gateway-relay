@@ -145,24 +145,27 @@ class Store:
             return False
 
     def next_for_device(self, device_id: str) -> Optional[sqlite3.Row]:
-        """Return the oldest queued intent for *device_id* and mark it in-flight."""
+        """Return the oldest queued intent for *device_id* and mark it in-flight.
+
+        Uses a single atomic UPDATE … RETURNING statement (SQLite ≥3.35) to
+        avoid the SELECT-then-UPDATE TOCTOU race that could hand the same
+        intent to two concurrent WebSocket drains.
+        """
         row = self._conn.execute(
             """
-            SELECT * FROM intents
-            WHERE device_id = ? AND status = 'queued'
-            ORDER BY created_at ASC
-            LIMIT 1
+            UPDATE intents
+               SET status = 'in-flight'
+             WHERE intent_id = (
+                   SELECT intent_id
+                     FROM intents
+                    WHERE device_id = ? AND status = 'queued'
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                   )
+            RETURNING *
             """,
             (device_id,),
         ).fetchone()
-
-        if row is None:
-            return None
-
-        self._conn.execute(
-            "UPDATE intents SET status = 'in-flight' WHERE intent_id = ?",
-            (row["intent_id"],),
-        )
         self._conn.commit()
         return row
 

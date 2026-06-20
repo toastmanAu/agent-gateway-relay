@@ -19,7 +19,7 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from relay.biscuit_check import precheck
@@ -67,6 +67,9 @@ class PairReq(BaseModel):
     root_pub_hex: str
     device_token: str
     fcm_token: str = ""
+    # Only required when re-pairing an already-registered device_id.
+    # Trust-on-first-use for the initial pairing.
+    prev_device_token: Optional[str] = None
 
 
 class IntentReq(BaseModel):
@@ -101,7 +104,24 @@ class RevokeReq(BaseModel):
 
 @app.post("/pair")
 def pair(r: PairReq):
-    """Register or update a paired device.  Token is hashed before storage."""
+    """Register or update a paired device.  Token is hashed before storage.
+
+    Security model: this relay is intended to bind to the tailnet only
+    (network-level restriction is the outer defence).  Within that perimeter,
+    trust-on-first-use applies for initial pairing.  Re-pairing an existing
+    device_id requires the caller to supply the current device_token via
+    prev_device_token so an attacker who only knows the device_id cannot
+    rotate the root public key and hijack a device's biscuit authority.
+    """
+    existing = store.device_root_pub(r.device_id)
+    if existing is not None:
+        # Device already registered — require proof of the current token.
+        if not r.prev_device_token:
+            raise HTTPException(status_code=403, detail="prev_device_token required for re-pair")
+        dev = store.device_by_token(r.prev_device_token)
+        if dev is None or dev["device_id"] != r.device_id:
+            raise HTTPException(status_code=403, detail="prev_device_token mismatch")
+
     token_hash = hashlib.sha256(r.device_token.encode()).hexdigest()
     store.pair_device(r.device_id, r.root_pub_hex, token_hash, r.fcm_token)
     return {"ok": True}
@@ -110,6 +130,7 @@ def pair(r: PairReq):
 @app.post("/relay/intent")
 async def relay_intent(
     r: IntentReq,
+    request: Request,
     x_forwarded_for: Optional[str] = Header(default=None),
 ):
     """Agent submits a signed biscuit intent.  Prechecks the token, then queues."""
@@ -117,7 +138,10 @@ async def relay_intent(
     if not root_pub:
         raise HTTPException(status_code=404, detail="unknown device")
 
-    source_ip = (x_forwarded_for or "").split(",")[0].strip() or "0.0.0.0"
+    source_ip = (
+        (x_forwarded_for or "").split(",")[0].strip()
+        or (request.client.host if request.client else "0.0.0.0")
+    )
     now = int(time.time())
 
     pc = precheck(r.token, root_pub, r.op, r.to, source_ip, now)
@@ -162,8 +186,16 @@ def intent_status(iid: str):
 
 @app.post("/relay/result")
 def relay_result(r: ResultReq):
-    """Device reports the outcome of executing an intent."""
-    _auth_device(r.device_token)
+    """Device reports the outcome of executing an intent.
+
+    After authenticating the caller, verify the intent belongs to *their*
+    device before accepting the result.  This prevents device A from marking
+    device B's intent as 'sent' with a fabricated tx_hash.
+    """
+    authed_device_id = _auth_device(r.device_token)
+    intent = store.get_intent(r.intent_id)
+    if intent is None or intent["device_id"] != authed_device_id:
+        raise HTTPException(status_code=403, detail="intent does not belong to this device")
     store.set_result(r.intent_id, r.status, r.tx_hash, r.error)
     return {"ok": True}
 
