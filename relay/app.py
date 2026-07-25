@@ -177,11 +177,23 @@ async def relay_intent(
 
 @app.get("/relay/intent/{iid}")
 def intent_status(iid: str):
-    """Poll status of a previously submitted intent."""
+    """Poll status of a previously submitted intent.
+
+    `device_online` reflects whether the target device currently holds a live
+    WebSocket in the in-process connection registry. It lets the POS tell a
+    genuinely-unreachable phone (queued + offline) apart from one that is merely
+    still deciding. Authoritative only while the relay runs as a single process
+    (see the design spec §4.1 multi-worker caveat).
+    """
     row = store.get_intent(iid)
     if not row:
         raise HTTPException(status_code=404, detail="not found")
-    return {"status": row["status"], "txHash": row["tx_hash"], "error": row["error"]}
+    return {
+        "status": row["status"],
+        "txHash": row["tx_hash"],
+        "error": row["error"],
+        "device_online": registry.is_connected(row["device_id"]),
+    }
 
 
 @app.post("/relay/result")

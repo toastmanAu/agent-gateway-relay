@@ -400,6 +400,57 @@ def test_intent_status_get(paired_client, kp):
     assert body["txHash"] is None
 
 
+def test_intent_status_includes_device_online_false_when_offline(paired_client, kp):
+    """With no live WS for the device, status poll reports device_online == False."""
+    token = _mint_token(kp)
+    post_r = paired_client.post(
+        "/relay/intent",
+        json={
+            "device_id": DEVICE_ID,
+            "token": token,
+            "op": OP,
+            "asset": "CKB",
+            "to": DEVICE_ID,
+            "amount": 10,
+            "nonce": "online_nonce_off",
+        },
+        headers={"x-forwarded-for": SOURCE_IP},
+    )
+    intent_id = post_r.json()["intent_id"]
+
+    body = paired_client.get(f"/relay/intent/{intent_id}").json()
+    assert body["device_online"] is False
+
+
+def test_intent_status_includes_device_online_true_when_connected(paired_client, kp):
+    """When the device is registered as connected, status poll reports device_online == True."""
+    import relay.app as app_module
+
+    token = _mint_token(kp)
+    post_r = paired_client.post(
+        "/relay/intent",
+        json={
+            "device_id": DEVICE_ID,
+            "token": token,
+            "op": OP,
+            "asset": "CKB",
+            "to": DEVICE_ID,
+            "amount": 10,
+            "nonce": "online_nonce_on",
+        },
+        headers={"x-forwarded-for": SOURCE_IP},
+    )
+    intent_id = post_r.json()["intent_id"]
+
+    # Simulate a live WebSocket for this device (registry maps device_id -> ws).
+    app_module.registry.add(DEVICE_ID, object())
+    try:
+        body = paired_client.get(f"/relay/intent/{intent_id}").json()
+        assert body["device_online"] is True
+    finally:
+        app_module.registry.remove(DEVICE_ID)
+
+
 def test_intent_status_not_found(client):
     r = client.get("/relay/intent/0" * 64)
     assert r.status_code == 404
